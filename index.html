@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SafetyGPT - Route Comparison</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; background-color: #f4f4f9; display: flex; flex-direction: column; height: 100vh; }
+        header { background-color: #2c3e50; color: white; padding: 15px 20px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        #app-container { display: flex; flex: 1; overflow: hidden; }
+        #controls-panel { width: 400px; padding: 20px; background-color: #ffffff; overflow-y: auto; box-shadow: 2px 0 5px rgba(0,0,0,0.1); display: flex; flex-direction: column; }
+        #map { flex-grow: 1; }
+        .control-group { margin-bottom: 15px; }
+        .hazard-option { display: flex; align-items: center; margin-bottom: 8px; font-size: 14px; }
+        .hazard-option input { margin-right: 10px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; color: #34495e; }
+        input[type="text"] { width: 100%; padding: 10px; border: 1px solid #bdc3c7; border-radius: 4px; box-sizing: border-box; }
+        button { width: 100%; padding: 12px; background-color: #3498db; color: white; border: none; border-radius: 4px; font-size: 16px; cursor: pointer; transition: background-color 0.3s; margin-top: 10px; }
+        #results-container { margin-top: 20px; border-top: 1px solid #ddd; padding-top: 15px; }
+        .result-card { border: 1px solid #eee; border-radius: 5px; padding: 15px; margin-bottom: 15px; background-color: #fafafa; }
+        .result-card h3 { margin-top: 0; font-size: 18px; color: #2c3e50; }
+        .result-card .summary { font-weight: bold; }
+        .hazards-list { list-style-type: none; padding-left: 0; font-size: 13px; max-height: 150px; overflow-y: auto; }
+        .hazards-list li { background-color: #ecf0f1; padding: 8px; border-radius: 3px; margin-bottom: 5px; border-left: 3px solid #e74c3c; }
+        .hazards-list li.safe { border-left-color: #f1c40f; }
+        .warnings-list li { border-left-color: #e67e22; }
+        .hidden { display: none; }
+        #loader { border: 5px solid #f3f3f3; border-top: 5px solid #3498db; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 20px auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <header><h1>SafetyGPT</h1></header>
+
+    <div id="app-container">
+        <div id="controls-panel">
+            <h2>Plan Your Route</h2>
+            <div class="control-group">
+                <label for="start-location">Start Location</label>
+                <input type="text" id="start-location" value="Times Square, NY">
+            </div>
+            <div class="control-group">
+                <label for="end-location">End Location</label>
+                <input type="text" id="end-location" value="Columbia University, NY">
+            </div>
+
+            <div class="control-group">
+                <h4>Avoid These Hazards (for Walking Route):</h4>
+                <div id="hazard-options">
+                    <label class="hazard-option"><input type="checkbox" name="hazard" value="Crime/Safety Concern" checked> Crime/Safety Concern</label>
+                    <label class="hazard-option"><input type="checkbox" name="hazard" value="Road Hazard" checked> Road Hazard</label>
+                    <label class="hazard-option"><input type="checkbox" name="hazard" value="Encampment/Assistance Call" checked> Encampment/Assistance Call</label>
+                    <label class="hazard-option"><input type="checkbox" name="hazard" value="Utility Issue"> Utility Issue</label>
+                    <label class="hazard-option"><input type="checkbox" name="hazard" value="Sanitation"> Sanitation</label>
+                </div>
+            </div>
+
+            <button id="find-route-btn">Compare Routes</button>
+            <div id="loader" class="hidden"></div>
+            <div id="results-container" class="hidden"></div>
+        </div>
+        <div id="map"></div>
+    </div>
+
+    <script>
+        const startInput = document.getElementById('start-location');
+        const endInput = document.getElementById('end-location');
+        const findRouteBtn = document.getElementById('find-route-btn');
+        const loader = document.getElementById('loader');
+        const resultsContainer = document.getElementById('results-container');
+        const map = L.map('map').setView([40.7128, -74.0060], 12);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(map);
+        let mapLayers = L.featureGroup().addTo(map);
+
+        findRouteBtn.addEventListener('click', getAndDisplayRoutes);
+
+        async function getAndDisplayRoutes() {
+            const start = startInput.value;
+            const end = endInput.value;
+            if (!start || !end) return alert('Please enter both locations.');
+
+            const selectedHazards = Array.from(document.querySelectorAll('#hazard-options input:checked')).map(cb => cb.value);
+
+            console.log("Sending these categories to backend:", selectedHazards);
+
+            loader.classList.remove('hidden');
+            resultsContainer.classList.add('hidden');
+            resultsContainer.innerHTML = '';
+            mapLayers.clearLayers();
+
+            try {
+                const response = await fetch('http://127.0.0.1:5000/get_safe_route', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ start, end, unsafe_categories: selectedHazards })
+                });
+                if (!response.ok) throw new Error((await response.json()).error || 'Server error');
+                
+                const data = await response.json();
+                displayResults(data);
+
+            } catch (error) {
+                alert('Could not fetch routes: ' + error.message);
+            } finally {
+                loader.classList.add('hidden');
+            }
+        }
+
+        function decodePolyline(encoded) {
+            let lat = 0, lng = 0, array = []; let index = 0;
+            while (index < encoded.length) {
+                let B, shift = 0, result = 0;
+                do { B = encoded.charCodeAt(index++) - 63; result |= (B & 0x1f) << shift; shift += 5; } while (B >= 0x20);
+                let dLat = ((result & 1) ? ~(result >> 1) : (result >> 1)); lat += dLat;
+                shift = 0; result = 0;
+                do { B = encoded.charCodeAt(index++) - 63; result |= (B & 0x1f) << shift; shift += 5; } while (B >= 0x20);
+                let dLng = ((result & 1) ? ~(result >> 1) : (result >> 1)); lng += dLng;
+                array.push([lat * 1e-5, lng * 1e-5]);
+            }
+            return array;
+        }
+
+        function displayResults(data) {
+            resultsContainer.classList.remove('hidden');
+            let bounds = L.latLngBounds();
+
+            // --- Display Walking Route ---
+            if (data.walking_route_analysis) {
+                const analysis = data.walking_route_analysis;
+                const routeData = analysis.route_data;
+                const polyline = decodePolyline(routeData.overview_polyline.points);
+                const routeLine = L.polyline(polyline, { color: '#3498db', weight: 5, opacity: 0.8 }).addTo(mapLayers);
+                bounds.extend(routeLine.getBounds());
+
+                let hazardHTML = '<ul class="hazards-list">';
+                if (analysis.hazards.length > 0) {
+                    analysis.hazards.forEach(h => {
+                        hazardHTML += `<li class="${h.is_counted ? '' : 'safe'}">${h.complaint} (Score: ${h.ai_analysis.score})</li>`;
+                        const icon = L.icon({
+                            iconUrl: `https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-${h.is_counted ? 'red' : 'yellow'}.png`,
+                            iconSize: [25, 41], iconAnchor: [12, 41]
+                        });
+                        L.marker(h.location, {icon}).addTo(mapLayers).bindPopup(`<b>${h.complaint}</b><br>${h.descriptor}`);
+                    });
+                } else {
+                    hazardHTML += '<li>No 311 hazards found on this route.</li>';
+                }
+                hazardHTML += '</ul>';
+
+                resultsContainer.innerHTML += `
+                    <div class="result-card">
+                        <h3>🚶 Walking Route</h3>
+                        <p class="summary">${routeData.summary} (${routeData.legs[0].duration.text})</p>
+                        <p><strong>Safety Score:</strong> ${analysis.total_hazard_score}</p>
+                        ${hazardHTML}
+                    </div>
+                `;
+            }
+
+            // --- Display Transit Route ---
+            if (data.transit_route_analysis) {
+                const analysis = data.transit_route_analysis;
+                const routeData = analysis.route_data;
+                const polyline = decodePolyline(routeData.overview_polyline.points);
+                const routeLine = L.polyline(polyline, { color: '#e67e22', weight: 5, opacity: 0.8 }).addTo(mapLayers);
+                bounds.extend(routeLine.getBounds());
+
+                let warningsHTML = '<ul class="hazards-list warnings-list">';
+                if (analysis.warnings.length > 0) {
+                    analysis.warnings.forEach(w => warningsHTML += `<li>${w}</li>`);
+                } else {
+                    warningsHTML += '<li>No service alerts reported by Google.</li>';
+                }
+                warningsHTML += '</ul>';
+
+                resultsContainer.innerHTML += `
+                    <div class="result-card">
+                        <h3>🚇 Transit Route</h3>
+                        <p class="summary">${routeData.summary} (${routeData.legs[0].duration.text})</p>
+                        <p><strong>Google Service Alerts:</strong></p>
+                        ${warningsHTML}
+                    </div>
+                `;
+            }
+
+            if (bounds.isValid()) {
+                map.fitBounds(bounds, {padding: [50, 50]});
+            }
+        }
+    </script>
+</body>
+</html>
